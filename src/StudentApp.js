@@ -1,584 +1,375 @@
+// StudentExam.jsx
 import React, { useState, useEffect, useRef } from 'react';
-import { Device } from 'mediasoup-client';
 import io from 'socket.io-client';
+import * as mediasoupClient from 'mediasoup-client';
 
-const StudentApp = () => {
+const StudentExam = ({ examId, userId }) => {
   const [isConnected, setIsConnected] = useState(false);
-  const [isStreamingCamera, setIsStreamingCamera] = useState(false);
-  const [isStreamingScreen, setIsStreamingScreen] = useState(false);
-  const [studentId, setStudentId] = useState('');
-  const [examId, setExamId] = useState('');
-  const [logs, setLogs] = useState([]);
-  const [currentPeerId, setCurrentPeerId] = useState('');
-
-  const localVideoRef = useRef(null);
-  const screenVideoRef = useRef(null);
+  const [isCameraOn, setIsCameraOn] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState('Disconnected');
+  
+  // Refs
   const socketRef = useRef(null);
   const deviceRef = useRef(null);
+  const sendTransportRef = useRef(null);
+  const cameraVideoRef = useRef(null);
+  const screenVideoRef = useRef(null);
   const cameraProducerRef = useRef(null);
   const screenProducerRef = useRef(null);
-  const transportRef = useRef(null);
+  const cameraStreamRef = useRef(null);
+  const screenStreamRef = useRef(null);
 
-  // Add log function
-  const addLog = (message, type = 'info') => {
-    const timestamp = new Date().toLocaleTimeString();
-    setLogs(prev => [...prev, { message, type, timestamp }]);
-    console.log(`${timestamp} - ${message}`);
-  };
+  // ✅ OPTIMIZED: Initialize connection
+  useEffect(() => {
+    initializeConnection();
+    return () => cleanup();
+  }, []);
 
-  // Initialize socket connection
-  const connectToServer = async () => {
+  const initializeConnection = async () => {
     try {
-      addLog('🔌 Connecting to server...');
+      setConnectionStatus('Connecting...');
       
-      socketRef.current = io('http://localhost:5000', {
-        forceNew: true
+      // Initialize socket
+      socketRef.current = io('http://192.168.0.13:5000', {
+        transports: ['websocket']
       });
 
       socketRef.current.on('connect', () => {
+        console.log('✅ Socket connected');
         setIsConnected(true);
-        addLog(`✅ Connected with socket ID: ${socketRef.current.id}`, 'success');
+        joinExam();
       });
 
       socketRef.current.on('joinedExam', async (data) => {
-        addLog(`✅ Joined exam: ${data.examId}`, 'success');
-        addLog(`📋 Assigned Peer ID: ${data.peerId}`, 'info');
-        
-        setCurrentPeerId(data.peerId);
-        await initializeMediaSoup(data.peerId);
+        console.log('✅ Joined exam:', data);
+        setConnectionStatus('Setting up media...');
+        await setupMediaSoup(data.peerId);
       });
 
       socketRef.current.on('disconnect', () => {
         setIsConnected(false);
-        addLog('❌ Disconnected from server', 'error');
+        setConnectionStatus('Disconnected');
       });
+
     } catch (error) {
-      addLog(`❌ Connection failed: ${error.message}`, 'error');
+      console.error('❌ Connection error:', error);
+      setConnectionStatus('Connection Failed');
     }
   };
 
-  // Initialize MediaSoup
-  const initializeMediaSoup = async (peerId) => {
-    try {
-      addLog(`📱 Initializing MediaSoup device with peer ID: ${peerId}...`);
-      
-      const response = await fetch('http://localhost:5000/api/rtp-capabilities');
-      const { rtpCapabilities } = await response.json();
-      
-      deviceRef.current = new Device();
-      await deviceRef.current.load({ routerRtpCapabilities: rtpCapabilities });
-      
-      addLog('✅ MediaSoup device loaded', 'success');
-      await createSendTransport(peerId);
-      
-    } catch (error) {
-      addLog(`❌ MediaSoup initialization failed: ${error.message}`, 'error');
-    }
+  const joinExam = () => {
+    socketRef.current.emit('joinExam', {
+      examId,
+      role: 'student',
+      userId
+    });
   };
 
-  // Create send transport
-  const createSendTransport = async (peerId) => {
+  // ✅ OPTIMIZED: Setup MediaSoup with transport reuse
+  const setupMediaSoup = async (peerId) => {
     try {
-      addLog(`🚛 Creating send transport for peer: ${peerId}...`);
-      
-      const response = await fetch('http://localhost:5000/api/create-transport', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          peerId: peerId,
-          direction: 'send'
-        })
-      });
+      console.log('🚀 Setting up MediaSoup...');
 
-      const { transport: transportData } = await response.json();
-      
-      transportRef.current = deviceRef.current.createSendTransport({
-        id: transportData.id,
-        iceParameters: transportData.iceParameters,
-        iceCandidates: transportData.iceCandidates,
-        dtlsParameters: transportData.dtlsParameters
-      });
+      // Get RTP capabilities
+      const rtpCapabilities = await fetch('http://192.168.0.13:5000/api/rtp-capabilities')
+        .then(res => res.json());
 
-      transportRef.current.on('connect', async ({ dtlsParameters }, callback, errback) => {
-        try {
-          addLog(`🔌 Connecting transport for peer: ${peerId}...`);
-          
-          await fetch('http://localhost:5000/api/connect-transport', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              peerId: peerId,
-              dtlsParameters
-            })
-          });
-
-          callback();
-          addLog('✅ Transport connected successfully', 'success');
-        } catch (error) {
-          addLog(`❌ Transport connection failed: ${error.message}`, 'error');
-          errback(error);
-        }
-      });
-
-      transportRef.current.on('produce', async ({ kind, rtpParameters, appData }, callback, errback) => {
-        try {
-          const streamType = appData.streamType || 'camera';
-          addLog(`📺 Creating ${streamType} producer for ${kind} with peer: ${peerId}...`);
-          
-          const response = await fetch('http://localhost:5000/api/produce', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              peerId: peerId,
-              kind,
-              rtpParameters,
-              examId,
-              streamType
-            })
-          });
-
-          const { producerId } = await response.json();
-          callback({ id: producerId });
-          addLog(`✅ ${streamType} producer created: ${producerId}`, 'success');
-        } catch (error) {
-          addLog(`❌ Producer creation failed: ${error.message}`, 'error');
-          errback(error);
-        }
-      });
-
-      addLog('✅ Send transport created successfully', 'success');
-      
-    } catch (error) {
-      addLog(`❌ Transport creation failed: ${error.message}`, 'error');
-    }
-  };
-
-  // ✅ NEW: Start camera streaming
-  const startCameraStreaming = async () => {
-    try {
-      if (!currentPeerId) {
-        addLog('❌ No peer ID available. Please join exam first.', 'error');
-        return;
+      if (!rtpCapabilities.success) {
+        throw new Error('Failed to get RTP capabilities');
       }
 
-      addLog('📹 Starting camera stream...');
+      // Create device
+      deviceRef.current = new mediasoupClient.Device();
+      await deviceRef.current.load({ 
+        routerRtpCapabilities: rtpCapabilities.rtpCapabilities 
+      });
+
+      // ✅ OPTIMIZED: Setup transports in single call
+      const transportData = await fetch('http://192.168.0.13:5000/api/setup-transports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ peerId, role: 'student' })
+      }).then(res => res.json());
+
+      if (!transportData.success) {
+        throw new Error('Failed to setup transports');
+      }
+
+      // Create send transport
+      sendTransportRef.current = deviceRef.current.createSendTransport({
+        id: transportData.transports.send.id,
+        iceParameters: transportData.transports.send.iceParameters,
+        iceCandidates: transportData.transports.send.iceCandidates,
+        dtlsParameters: transportData.transports.send.dtlsParameters
+      });
+
+      // Setup transport event handlers
+      sendTransportRef.current.on('connect', async ({ dtlsParameters }, callback, errback) => {
+        try {
+          // ✅ OPTIMIZED: Connect transport
+          await fetch('http://192.168.0.13:5000/api/connect-transports', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              peerId, 
+              sendDtlsParameters: dtlsParameters 
+            })
+          });
+          callback();
+        } catch (error) {
+          errback(error);
+        }
+      });
+
+      sendTransportRef.current.on('produce', async (parameters, callback, errback) => {
+        try {
+          const response = await fetch('http://192.168.0.13:5000/api/produce', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              peerId,
+              kind: parameters.kind,
+              rtpParameters: parameters.rtpParameters,
+              streamType: parameters.appData.streamType
+            })
+          });
+          
+          const result = await response.json();
+          callback({ id: result.producerId });
+        } catch (error) {
+          errback(error);
+        }
+      });
+
+      setConnectionStatus('Ready for exam');
+      console.log('✅ MediaSoup setup complete');
+
+    } catch (error) {
+      console.error('❌ MediaSoup setup error:', error);
+      setConnectionStatus('Setup Failed');
+    }
+  };
+
+  // ✅ Start camera
+  const startCamera = async () => {
+    try {
+      console.log('📷 Starting camera...');
       
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 }
-        },
+        video: { width: 640, height: 480 },
         audio: true
       });
 
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
+      cameraStreamRef.current = stream;
+      if (cameraVideoRef.current) {
+        cameraVideoRef.current.srcObject = stream;
       }
 
+      // Produce camera stream
       const videoTrack = stream.getVideoTracks()[0];
-      cameraProducerRef.current = await transportRef.current.produce({
+      cameraProducerRef.current = await sendTransportRef.current.produce({
         track: videoTrack,
-        encodings: [
-          { maxBitrate: 100000 },
-          { maxBitrate: 300000 },
-          { maxBitrate: 900000 }
-        ],
-        codecOptions: {
-          videoGoogleStartBitrate: 1000
-        },
         appData: { streamType: 'camera' }
       });
 
-      setIsStreamingCamera(true);
-      addLog('✅ Camera streaming started successfully!', 'success');
-      
+      // Produce audio
+      const audioTrack = stream.getAudioTracks()[0];
+      await sendTransportRef.current.produce({
+        track: audioTrack,
+        appData: { streamType: 'audio' }
+      });
+
+      setIsCameraOn(true);
+      console.log('✅ Camera started');
+
     } catch (error) {
-      addLog(`❌ Camera streaming failed: ${error.message}`, 'error');
+      console.error('❌ Camera error:', error);
     }
   };
 
-  // ✅ NEW: Start screen sharing
-  const startScreenSharing = async () => {
+  // ✅ Start screen sharing
+  const startScreenShare = async () => {
     try {
-      if (!currentPeerId) {
-        addLog('❌ No peer ID available. Please join exam first.', 'error');
-        return;
-      }
-
-      addLog('🖥️ Starting screen sharing...');
+      console.log('🖥️ Starting screen share...');
       
-      // ✅ Use getDisplayMedia for screen capture
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          width: { max: 1920 },
-          height: { max: 1080 },
-          frameRate: { max: 30 }
-        },
-        audio: true // Include system audio if available
+        video: { width: 1280, height: 720 },
+        audio: false
       });
 
+      screenStreamRef.current = stream;
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = stream;
       }
 
+      // Produce screen stream
       const videoTrack = stream.getVideoTracks()[0];
-      
-      // ✅ Handle screen share stop event
-      videoTrack.addEventListener('ended', () => {
-        addLog('🖥️ Screen sharing stopped by user', 'warning');
-        stopScreenSharing();
-      });
-
-      screenProducerRef.current = await transportRef.current.produce({
+      screenProducerRef.current = await sendTransportRef.current.produce({
         track: videoTrack,
-        encodings: [
-          { maxBitrate: 2000000 }, // Higher bitrate for screen
-          { maxBitrate: 1000000 },
-          { maxBitrate: 500000 }
-        ],
-        codecOptions: {
-          videoGoogleStartBitrate: 1000
-        },
         appData: { streamType: 'screen' }
       });
 
-      // ✅ Handle audio track if available
-      const audioTracks = stream.getAudioTracks();
-      if (audioTracks.length > 0) {
-        await transportRef.current.produce({
-          track: audioTracks[0],
-          appData: { streamType: 'screenAudio' }
-        });
-        addLog('🎵 Screen audio included', 'info');
-      }
+      // Handle screen share end
+      videoTrack.onended = () => {
+        stopScreenShare();
+      };
 
-      setIsStreamingScreen(true);
-      addLog('✅ Screen sharing started successfully!', 'success');
-      
+      setIsScreenSharing(true);
+      console.log('✅ Screen sharing started');
+
     } catch (error) {
-      addLog(`❌ Screen sharing failed: ${error.message}`, 'error');
+      console.error('❌ Screen share error:', error);
     }
   };
 
-  // ✅ NEW: Stop camera streaming
-  const stopCameraStreaming = () => {
+  const stopCamera = () => {
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach(track => track.stop());
+      cameraStreamRef.current = null;
+    }
     if (cameraProducerRef.current) {
       cameraProducerRef.current.close();
       cameraProducerRef.current = null;
     }
-    
-    if (localVideoRef.current && localVideoRef.current.srcObject) {
-      localVideoRef.current.srcObject.getTracks().forEach(track => track.stop());
-      localVideoRef.current.srcObject = null;
-    }
-    
-    setIsStreamingCamera(false);
-    addLog('⏹️ Camera streaming stopped', 'info');
+    setIsCameraOn(false);
   };
 
-  // ✅ NEW: Stop screen sharing
-  const stopScreenSharing = () => {
+  const stopScreenShare = () => {
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
+      screenStreamRef.current = null;
+    }
     if (screenProducerRef.current) {
       screenProducerRef.current.close();
       screenProducerRef.current = null;
     }
-    
-    if (screenVideoRef.current && screenVideoRef.current.srcObject) {
-      screenVideoRef.current.srcObject.getTracks().forEach(track => track.stop());
-      screenVideoRef.current.srcObject = null;
-    }
-    
-    setIsStreamingScreen(false);
-    addLog('⏹️ Screen sharing stopped', 'info');
+    setIsScreenSharing(false);
   };
 
-  // Join exam
-  const joinExam = () => {
-    if (!studentId || !examId) {
-      addLog('❌ Please enter Student ID and Exam ID', 'error');
-      return;
+  const cleanup = () => {
+    stopCamera();
+    stopScreenShare();
+    if (sendTransportRef.current) {
+      sendTransportRef.current.close();
     }
-
-    addLog(`📋 Joining exam ${examId} as ${studentId}...`);
-    socketRef.current.emit('joinExam', {
-      examId,
-      role: 'student',
-      userId: studentId
-    });
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+    }
   };
 
   return (
-    <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
-      <h1>📚 Student Exam Interface - Enhanced with Screen Sharing</h1>
-      
-      {/* Connection Status */}
-      <div style={{ 
-        marginBottom: '20px', 
-        padding: '15px', 
-        backgroundColor: isConnected ? '#d4edda' : '#f8d7da', 
-        borderRadius: '8px',
-        border: `2px solid ${isConnected ? '#28a745' : '#dc3545'}`
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
-          <div>
-            <strong>Status:</strong> {isConnected ? '✅ Connected' : '❌ Disconnected'}
-          </div>
-          {currentPeerId && (
-            <div>
-              <strong>Peer ID:</strong> <code>{currentPeerId}</code>
-            </div>
-          )}
-          <div>
-            <strong>Camera:</strong> {isStreamingCamera ? '🟢 Live' : '🔴 Off'}
-          </div>
-          <div>
-            <strong>Screen:</strong> {isStreamingScreen ? '🟢 Sharing' : '🔴 Off'}
+    <div className="min-h-screen bg-gray-100 p-6">
+      <div className="max-w-4xl mx-auto">
+        {/* Header */}
+        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+          <h1 className="text-2xl font-bold text-gray-800 mb-2">
+            Student Exam Portal
+          </h1>
+          <div className="flex items-center space-x-4">
+            <span className="text-sm text-gray-600">
+              Status: <span className={`font-semibold ${
+                isConnected ? 'text-green-600' : 'text-red-600'
+              }`}>
+                {connectionStatus}
+              </span>
+            </span>
+            <span className="text-sm text-gray-600">
+              Exam ID: {examId}
+            </span>
+            <span className="text-sm text-gray-600">
+              User ID: {userId}
+            </span>
           </div>
         </div>
-      </div>
-      
-      {/* Connection Form */}
-      <div style={{ 
-        marginBottom: '25px', 
-        padding: '20px', 
-        border: '2px solid #dee2e6', 
-        borderRadius: '12px',
-        backgroundColor: '#f8f9fa'
-      }}>
-        <h3 style={{ marginBottom: '15px' }}>🔐 Student Login</h3>
-        <div style={{ display: 'flex', gap: '15px', alignItems: 'end', flexWrap: 'wrap' }}>
-          <div>
-            <label style={{ fontSize: '14px', fontWeight: 'bold' }}>Student ID:</label><br />
-            <input
-              type="text"
-              value={studentId}
-              onChange={(e) => setStudentId(e.target.value)}
-              placeholder="Enter your student ID (e.g., Kreet)"
-              style={{ 
-                padding: '10px', 
-                width: '200px',
-                border: '2px solid #ced4da',
-                borderRadius: '6px'
-              }}
-            />
-          </div>
-          
-          <div>
-            <label style={{ fontSize: '14px', fontWeight: 'bold' }}>Exam ID:</label><br />
-            <input
-              type="text"
-              value={examId}
-              onChange={(e) => setExamId(e.target.value)}
-              placeholder="Enter exam ID (e.g., 11)"
-              style={{ 
-                padding: '10px', 
-                width: '200px',
-                border: '2px solid #ced4da',
-                borderRadius: '6px'
-              }}
-            />
-          </div>
-          
-          <button 
-            onClick={connectToServer} 
-            disabled={isConnected}
-            style={{ 
-              padding: '10px 20px',
-              backgroundColor: isConnected ? '#6c757d' : '#007bff',
-              color: 'white',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: isConnected ? 'not-allowed' : 'pointer'
-            }}
-          >
-            {isConnected ? '✅ Connected' : '🔌 Connect'}
-          </button>
-          
-          <button 
-            onClick={joinExam} 
-            disabled={!isConnected || !studentId || !examId}
-            style={{ 
-              padding: '10px 20px',
-              backgroundColor: (!isConnected || !studentId || !examId) ? '#6c757d' : '#28a745',
-              color: 'white',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: (!isConnected || !studentId || !examId) ? 'not-allowed' : 'pointer'
-            }}
-          >
-            📋 Join Exam
-          </button>
-        </div>
-      </div>
 
-      {/* Video Streaming Controls */}
-      <div style={{ display: 'flex', gap: '20px', marginBottom: '25px', flexWrap: 'wrap' }}>
-        
-        {/* Camera Stream */}
-        <div style={{ 
-          flex: '1', 
-          minWidth: '400px',
-          padding: '20px', 
-          border: '2px solid #dee2e6', 
-          borderRadius: '12px',
-          backgroundColor: '#ffffff'
-        }}>
-          <h3 style={{ marginBottom: '15px', color: '#495057' }}>📹 Camera Stream</h3>
-          
-          <video
-            ref={localVideoRef}
-            autoPlay
-            muted
-            playsInline
-            style={{
-              width: '100%',
-              maxWidth: '400px',
-              height: 'auto',
-              border: `3px solid ${isStreamingCamera ? '#28a745' : '#dee2e6'}`,
-              borderRadius: '8px',
-              marginBottom: '15px',
-              backgroundColor: '#000'
-            }}
-          />
-          
-          <div>
+        {/* Controls */}
+        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+          <div className="flex space-x-4">
             <button
-              onClick={startCameraStreaming}
-              disabled={!currentPeerId || isStreamingCamera}
-              style={{ 
-                marginRight: '10px', 
-                padding: '10px 20px',
-                backgroundColor: currentPeerId && !isStreamingCamera ? '#28a745' : '#6c757d', 
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: currentPeerId && !isStreamingCamera ? 'pointer' : 'not-allowed'
-              }}
+              onClick={isCameraOn ? stopCamera : startCamera}
+              disabled={!isConnected}
+              className={`px-6 py-3 rounded-lg font-semibold transition-all ${
+                isCameraOn 
+                  ? 'bg-red-500 hover:bg-red-600 text-white' 
+                  : 'bg-green-500 hover:bg-green-600 text-white'
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
             >
-              {isStreamingCamera ? '📹 Streaming...' : '📹 Start Camera'}
+              {isCameraOn ? '📷 Stop Camera' : '📷 Start Camera'}
             </button>
             
             <button
-              onClick={stopCameraStreaming}
-              disabled={!isStreamingCamera}
-              style={{ 
-                padding: '10px 20px',
-                backgroundColor: isStreamingCamera ? '#dc3545' : '#6c757d',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: isStreamingCamera ? 'pointer' : 'not-allowed'
-              }}
+              onClick={isScreenSharing ? stopScreenShare : startScreenShare}
+              disabled={!isConnected}
+              className={`px-6 py-3 rounded-lg font-semibold transition-all ${
+                isScreenSharing 
+                  ? 'bg-red-500 hover:bg-red-600 text-white' 
+                  : 'bg-blue-500 hover:bg-blue-600 text-white'
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
             >
-              ⏹️ Stop Camera
+              {isScreenSharing ? '🖥️ Stop Screen' : '🖥️ Share Screen'}
             </button>
           </div>
         </div>
 
-        {/* Screen Share */}
-        <div style={{ 
-          flex: '1', 
-          minWidth: '400px',
-          padding: '20px', 
-          border: '2px solid #dee2e6', 
-          borderRadius: '12px',
-          backgroundColor: '#ffffff'
-        }}>
-          <h3 style={{ marginBottom: '15px', color: '#495057' }}>🖥️ Screen Share</h3>
-          
-          <video
-            ref={screenVideoRef}
-            autoPlay
-            muted
-            playsInline
-            style={{
-              width: '100%',
-              maxWidth: '400px',
-              height: 'auto',
-              border: `3px solid ${isStreamingScreen ? '#17a2b8' : '#dee2e6'}`,
-              borderRadius: '8px',
-              marginBottom: '15px',
-              backgroundColor: '#000'
-            }}
-          />
-          
-          <div>
-            <button
-              onClick={startScreenSharing}
-              disabled={!currentPeerId || isStreamingScreen}
-              style={{ 
-                marginRight: '10px', 
-                padding: '10px 20px',
-                backgroundColor: currentPeerId && !isStreamingScreen ? '#17a2b8' : '#6c757d', 
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: currentPeerId && !isStreamingScreen ? 'pointer' : 'not-allowed'
-              }}
-            >
-              {isStreamingScreen ? '🖥️ Sharing...' : '🖥️ Share Screen'}
-            </button>
-            
-            <button
-              onClick={stopScreenSharing}
-              disabled={!isStreamingScreen}
-              style={{ 
-                padding: '10px 20px',
-                backgroundColor: isStreamingScreen ? '#dc3545' : '#6c757d',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: isStreamingScreen ? 'pointer' : 'not-allowed'
-              }}
-            >
-              ⏹️ Stop Share
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* System Logs */}
-      <div style={{ 
-        padding: '20px', 
-        border: '2px solid #dee2e6', 
-        borderRadius: '12px', 
-        backgroundColor: '#f8f9fa'
-      }}>
-        <h3 style={{ marginBottom: '15px' }}>📋 Connection Logs</h3>
-        <div style={{ 
-          height: '300px', 
-          overflowY: 'auto', 
-          fontSize: '13px', 
-          fontFamily: 'Monaco, Consolas, "Courier New", monospace',
-          backgroundColor: '#1e1e1e',
-          color: '#00ff41',
-          padding: '15px',
-          borderRadius: '8px'
-        }}>
-          {logs.length === 0 ? (
-            <div style={{ color: '#888', textAlign: 'center', paddingTop: '20px' }}>
-              Ready to connect...
+        {/* Video Displays */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Camera Feed */}
+          <div className="bg-white rounded-lg shadow-md p-4">
+            <h3 className="text-lg font-semibold mb-3 text-gray-700">
+              📷 Camera Feed
+            </h3>
+            <div className="bg-gray-900 rounded-lg overflow-hidden">
+              <video
+                ref={cameraVideoRef}
+                autoPlay
+                muted
+                playsInline
+                className="w-full h-64 object-cover"
+              />
+              {!isCameraOn && (
+                <div className="w-full h-64 flex items-center justify-center text-gray-400">
+                  Camera Off
+                </div>
+              )}
             </div>
-          ) : (
-            logs.map((log, index) => (
-              <div
-                key={index}
-                style={{
-                  color: log.type === 'error' ? '#ff4757' : 
-                        log.type === 'success' ? '#2ed573' : 
-                        log.type === 'warning' ? '#ffa502' : '#00ff41',
-                  marginBottom: '3px',
-                  lineHeight: '1.4'
-                }}
-              >
-                [{log.timestamp}] {log.message}
-              </div>
-            ))
-          )}
+          </div>
+
+          {/* Screen Share */}
+          <div className="bg-white rounded-lg shadow-md p-4">
+            <h3 className="text-lg font-semibold mb-3 text-gray-700">
+              🖥️ Screen Share
+            </h3>
+            <div className="bg-gray-900 rounded-lg overflow-hidden">
+              <video
+                ref={screenVideoRef}
+                autoPlay
+                muted
+                playsInline
+                className="w-full h-64 object-cover"
+              />
+              {!isScreenSharing && (
+                <div className="w-full h-64 flex items-center justify-center text-gray-400">
+                  Screen Share Off
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Status Info */}
+        <div className="bg-white rounded-lg shadow-md p-6 mt-6">
+          <h3 className="text-lg font-semibold mb-3 text-gray-700">Connection Status</h3>
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            <div>Socket: {isConnected ? '✅ Connected' : '❌ Disconnected'}</div>
+            <div>Camera: {isCameraOn ? '✅ Active' : '⭕ Inactive'}</div>
+            <div>Screen: {isScreenSharing ? '✅ Sharing' : '⭕ Not Sharing'}</div>
+            <div>Status: {connectionStatus}</div>
+          </div>
         </div>
       </div>
     </div>
   );
 };
 
-export default StudentApp;
+export default StudentExam;
