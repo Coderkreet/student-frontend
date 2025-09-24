@@ -24,6 +24,7 @@ const StudentExam = ({ examId, userId }) => {
   useEffect(() => {
     initializeConnection();
     return () => cleanup();
+    // eslint-disable-next-line
   }, []);
 
   const initializeConnection = async () => {
@@ -31,7 +32,7 @@ const StudentExam = ({ examId, userId }) => {
       setConnectionStatus('Connecting...');
       
       // Initialize socket
-      socketRef.current = io('http://192.168.0.13:5000', {
+      socketRef.current = io('http://192.168.9.210:5000', {
         transports: ['websocket']
       });
 
@@ -72,7 +73,7 @@ const StudentExam = ({ examId, userId }) => {
       console.log('🚀 Setting up MediaSoup...');
 
       // Get RTP capabilities
-      const rtpCapabilities = await fetch('http://192.168.0.13:5000/api/rtp-capabilities')
+      const rtpCapabilities = await fetch('http://192.168.9.210:5000/api/rtp-capabilities')
         .then(res => res.json());
 
       if (!rtpCapabilities.success) {
@@ -86,7 +87,7 @@ const StudentExam = ({ examId, userId }) => {
       });
 
       // ✅ OPTIMIZED: Setup transports in single call
-      const transportData = await fetch('http://192.168.0.13:5000/api/setup-transports', {
+      const transportData = await fetch('http://192.168.9.210:5000/api/setup-transports', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ peerId, role: 'student' })
@@ -108,7 +109,7 @@ const StudentExam = ({ examId, userId }) => {
       sendTransportRef.current.on('connect', async ({ dtlsParameters }, callback, errback) => {
         try {
           // ✅ OPTIMIZED: Connect transport
-          await fetch('http://192.168.0.13:5000/api/connect-transports', {
+          await fetch('http://192.168.9.210:5000/api/connect-transports', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
@@ -124,7 +125,7 @@ const StudentExam = ({ examId, userId }) => {
 
       sendTransportRef.current.on('produce', async (parameters, callback, errback) => {
         try {
-          const response = await fetch('http://192.168.0.13:5000/api/produce', {
+          const response = await fetch('http://192.168.9.210:5000/api/produce', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -145,6 +146,14 @@ const StudentExam = ({ examId, userId }) => {
       setConnectionStatus('Ready for exam');
       console.log('✅ MediaSoup setup complete');
 
+      // === Auto request camera and screenshare permission on ready ===
+      if (!isCameraOn) {
+        startCamera();
+      }
+      if (!isScreenSharing) {
+        startScreenShare();
+      }
+
     } catch (error) {
       console.error('❌ MediaSoup setup error:', error);
       setConnectionStatus('Setup Failed');
@@ -155,10 +164,9 @@ const StudentExam = ({ examId, userId }) => {
   const startCamera = async () => {
     try {
       console.log('📷 Starting camera...');
-      
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: 640, height: 480 },
-        audio: true
+        audio: false
       });
 
       cameraStreamRef.current = stream;
@@ -166,18 +174,11 @@ const StudentExam = ({ examId, userId }) => {
         cameraVideoRef.current.srcObject = stream;
       }
 
-      // Produce camera stream
+      // Produce camera stream (video only)
       const videoTrack = stream.getVideoTracks()[0];
       cameraProducerRef.current = await sendTransportRef.current.produce({
         track: videoTrack,
         appData: { streamType: 'camera' }
-      });
-
-      // Produce audio
-      const audioTrack = stream.getAudioTracks()[0];
-      await sendTransportRef.current.produce({
-        track: audioTrack,
-        appData: { streamType: 'audio' }
       });
 
       setIsCameraOn(true);
@@ -192,7 +193,6 @@ const StudentExam = ({ examId, userId }) => {
   const startScreenShare = async () => {
     try {
       console.log('🖥️ Starting screen share...');
-      
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: { width: 1280, height: 720 },
         audio: false
